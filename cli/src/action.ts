@@ -1,8 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { AGENT_SOCKETS_DIR } from "pixel-store";
+import { AGENT_SOCKETS_DIR, tabMarkProperty } from "pixel-store";
 import type { Terminal } from "pixel-terminals";
 
 import { control } from "./control";
@@ -54,8 +55,26 @@ export function agentBrowserPath(): string {
   return execFileSync(script, ["--path"], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }).trim();
 }
 
-function sessionName(browser: Browser): string {
-  return `terminal-browser-${recordKey(browser)}`;
+// a mirrored tab lives in another browser, so it gets its own agent-browser session. The
+// name stays short because it ends up in a unix socket path, which macos keeps under 104 bytes
+export function sessionName(browser: Browser, tab: TabTarget): string {
+  if (!tab.mirror) return `terminal-browser-${recordKey(browser)}`;
+  const of = `${recordKey(browser)}:${tab.mirror.endpoint}`;
+  return `tbm-${crypto.createHash("sha1").update(of).digest("hex").slice(0, 12)}`;
+}
+
+function mirrorPort(endpoint: string): number {
+  const port = Number(new URL(endpoint).port);
+  if (!Number.isInteger(port) || port < 1) throw new Error(`${endpoint} has no port`);
+  return port;
+}
+
+function debugPort(browser: Browser, tab: TabTarget): number {
+  if (tab.mirror) return mirrorPort(tab.mirror.endpoint);
+  if (browser.cdpPort === null) {
+    throw new Error(`browser ${recordKey(browser)} has no debugging port`);
+  }
+  return browser.cdpPort;
 }
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -90,9 +109,25 @@ function evalResult(stdout: string): unknown {
   return parsed.data?.result;
 }
 
-function agentTabs(binary: string, browser: Browser): AgentTab[] {
-  const session = sessionName(browser);
-  const port = String(browser.cdpPort);
+/** agent-browser reports its failures as json on stdout, which is worth repeating */
+export function agentError(stdout: string): string {
+  try {
+    const parsed = JSON.parse(stdout) as { error?: unknown; message?: unknown };
+    const said = parsed.error ?? parsed.message;
+    if (typeof said === "string" && said) return said;
+    if (said && typeof said === "object") return JSON.stringify(said);
+  } catch {}
+  return stdout.trim();
+}
+
+function withReason(message: string, stdout: string): string {
+  const reason = agentError(stdout);
+  return reason ? `${message}: ${reason}` : message;
+}
+
+function agentTabs(binary: string, browser: Browser, tab: TabTarget): AgentTab[] {
+  const session = sessionName(browser, tab);
+  const port = String(debugPort(browser, tab));
   const listing = runAgent(binary, ["--session", session, "--cdp", port, "tab", "list", "--json"]);
   if (listing.status === 0) {
     try {
@@ -101,10 +136,17 @@ function agentTabs(binary: string, browser: Browser): AgentTab[] {
   }
   const reconnect = runAgent(binary, ["--session", session, "connect", port, "--json"]);
   if (reconnect.status !== 0) {
-    throw new Error(`could not connect agent-browser to terminal browser ${recordKey(browser)} on port ${port}`);
+    throw new Error(
+      withReason(
+        `could not connect agent-browser to ${recordKey(browser)} on port ${port}`,
+        reconnect.stdout,
+      ),
+    );
   }
   const retry = runAgent(binary, ["--session", session, "tab", "list", "--json"]);
-  if (retry.status !== 0) throw new Error("agent-browser could not list tabs after reconnecting");
+  if (retry.status !== 0) {
+    throw new Error(withReason("agent-browser could not list tabs", retry.stdout));
+  }
   return parseTabs(retry.stdout);
 }
 
@@ -139,6 +181,58 @@ function matchTab(
     } catch {}
   }
   throw new Error(`could not find terminal browser tab ${tab.id} (${tab.url}) among agent-browser's tabs`);
+}
+
+/** the browser we mirror numbers its tabs its own way, so ask the page which one it is */
+export function probeOrder(agentView: AgentTab[], url: string): AgentTab[] {
+  const likely = agentView.filter((entry) => entry.url === url);
+  return [...likely, ...agentView.filter((entry) => !likely.includes(entry))];
+}
+
+/** only the tab carrying our mark is ours, a shared url is never enough */
+export function findMarkedTab(
+  agentView: AgentTab[],
+  url: string,
+  marked: (tabId: string) => unknown,
+): AgentTab | null {
+  for (const candidate of probeOrder(agentView, url)) {
+    if (marked(candidate.tabId) === true) return { ...candidate, active: true };
+  }
+  return null;
+}
+
+async function matchMirrorTab(
+  binary: string,
+  session: string,
+  agentView: AgentTab[],
+  selection: Selection,
+): Promise<AgentTab> {
+  const { browser, tab } = selection;
+  const token = crypto.randomBytes(16).toString("hex");
+  const mark = `window[${JSON.stringify(tabMarkProperty(token))}] === true`;
+  await control(browser.socket, { cmd: "mark-tab", tab: tab.id, token, mark: true });
+  let found: AgentTab | null = null;
+  try {
+    found = findMarkedTab(agentView, tab.url, (tabId) => {
+      const switched = runAgent(binary, ["--session", session, "tab", tabId]);
+      if (switched.status !== 0) return null;
+      const probe = runAgent(binary, ["--session", session, "eval", mark, "--json"]);
+      if (probe.status !== 0) return null;
+      try {
+        return evalResult(probe.stdout);
+      } catch {
+        return null;
+      }
+    });
+  } finally {
+    await control(browser.socket, { cmd: "mark-tab", tab: tab.id, token, mark: false }).catch(
+      () => {},
+    );
+  }
+  if (found) return found;
+  throw new Error(
+    `agent-browser cannot see the mirrored tab ${tab.mirror?.targetId} on ${tab.mirror?.endpoint}`,
+  );
 }
 
 async function select(terminal: Terminal | null, options: ActionOptions): Promise<Selection> {
@@ -266,16 +360,17 @@ export async function actionCommand(terminal: Terminal | null, options: ActionOp
     return 0;
   }
 
-  if (browser.cdpPort === null) {
-    throw new Error(`browser ${recordKey(browser)} has no debugging port`);
-  }
+  debugPort(browser, tab);
   if (!tab.targetId) {
     throw new Error(`tab ${tab.id} has no CDP target yet — is the page still starting?`);
   }
 
   const binary = agentBrowserPath();
-  const session = sessionName(browser);
-  const match = matchTab(binary, session, agentTabs(binary, browser), tab);
+  const session = sessionName(browser, tab);
+  const agentView = agentTabs(binary, browser, tab);
+  const match = tab.mirror
+    ? await matchMirrorTab(binary, session, agentView, selection)
+    : matchTab(binary, session, agentView, tab);
   if (!match.active) {
     const switched = runAgent(binary, ["--session", session, "tab", match.tabId]);
     if (switched.status !== 0) throw new Error(`agent-browser could not switch to ${match.tabId}`);

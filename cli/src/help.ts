@@ -48,6 +48,18 @@ Options:
   --app-name=<name>     The name of the application
   --app-id=<id>         The identifier of the application
   --no-merge            Do not open the terminal-browser instance as a tab in a neighbor terminal-browser
+  --mirror              Show a tab from a browser you already have open, instead of
+                        starting a page of our own. That browser must have been
+                        started with --remote-debugging-port. Closing this pane lets
+                        go of the tab, it never closes it.
+  --port <port>         Which debugging port to mirror (default 9222)
+  --target <id>         Mirror this exact tab (ids come from terminal-browser ls, or
+                        from http://127.0.0.1:<port>/json/list). Without it the first
+                        tab that browser lists is mirrored.
+  --new-tab             Mirror a fresh tab in that browser rather than one already open
+
+A mirrored page belongs to the other browser, so it keeps its own window size, and find,
+devtools, zoom and pasting images are not available on it.
 
 
 Examples:
@@ -55,6 +67,9 @@ Examples:
   terminal-browser open ./report.html --split right
   terminal-browser open github.com/zenbu-labs --split down --size 0.4
   terminal-browser open --ssh dev@build-box localhost:8080
+  terminal-browser --mirror
+  terminal-browser open --mirror --port 9222 --split right
+  terminal-browser open --mirror --new-tab example.com
 `,
   },
   ls: {

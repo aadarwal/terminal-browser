@@ -4,6 +4,14 @@ import path from "node:path";
 
 import { z } from "zod";
 
+/** the property a terminal browser tab leaves on its page so tools can tell tabs apart */
+export const TAB_MARK_PROPERTY = "__terminalBrowserTab";
+
+/** each caller marks with its own token, so two of them can ask at once without erasing each other */
+export function tabMarkProperty(token: string): string {
+  return `${TAB_MARK_PROPERTY}_${token}`;
+}
+
 const HOME = os.homedir();
 
 function interopRoot(kind: "state" | "share"): string {

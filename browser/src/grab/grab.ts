@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import { bundledAsset } from "../assets";
-import type { BrowserController } from "../page/controller";
+import type { PageController } from "../page/page-controller";
 
 const CHANNEL = "grab";
 const PLUGIN = "terminal-browser";
@@ -82,7 +82,7 @@ export class Grab {
   active = false;
 
   constructor(
-    private readonly controller: BrowserController,
+    private readonly controller: PageController,
     private readonly hooks: GrabHooks,
   ) {
     controller.onEmit(CHANNEL, (data) => this.receive(data as GrabMessage));

@@ -33,6 +33,7 @@ import { browsers, describe, recordKey } from "./instances";
 import type { Browser } from "./instances";
 import { findHosts, openInHost } from "./interop";
 import { lsCommand } from "./ls";
+import { checkMirrorEndpoint, mirrorArgv, takeMirrorFlags } from "./mirror";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -502,6 +503,10 @@ const BROWSER_FLAGS = [
   "--console-key=",
   "--split-dir=",
   "--parent-tty=",
+  "--mirror",
+  "--mirror-port=",
+  "--mirror-target=",
+  "--mirror-new-tab",
 ];
 
 function rejectUnknownFlags(args: string[]) {
@@ -592,6 +597,14 @@ async function openCommand(args: string[]) {
   const noMerge = takeBoolFlag(args, "--no-merge") || mergeDisabled();
   if (size !== null && !split) fail("--size only applies to a split (--split <direction>)");
   takeSshFlags(args);
+  let mirror: ReturnType<typeof takeMirrorFlags> = null;
+  try {
+    mirror = takeMirrorFlags(args);
+    if (mirror) await checkMirrorEndpoint(mirror);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  if (mirror) args.push(...mirrorArgv(mirror));
   rejectUnknownFlags(args);
   const positionals = args.filter((arg) => !arg.startsWith("-"));
   if (positionals.length > 1) {
@@ -599,7 +612,8 @@ async function openCommand(args: string[]) {
   }
   const targeted = Boolean(process.env.TERMINAL_BROWSER_INTEROP_TARGET);
   const wouldSplit = split !== null || !interactiveTty();
-  if (!noMerge && (wouldSplit || targeted) && !args.some((arg) => arg.startsWith("--ssh="))) {
+  // a mirror has its own remote tab, so it never folds into a browser that is already open
+  if (!mirror && !noMerge && (wouldSplit || targeted) && !args.some((arg) => arg.startsWith("--ssh="))) {
     if (await tryAdopt(args)) return;
   }
   await requireGraphics(await currentTerminal());

@@ -7,7 +7,7 @@ import type {
   Surface,
   WheelEvent,
 } from "pixel-react";
-import type { BrowserController } from "../page/controller";
+import type { PageController } from "../page/page-controller";
 import { zoomDirection } from "../page/zoom";
 import { toolbarSize } from "../ui/markup-canvas";
 import { recordBarCluster, recordBarMetrics } from "../ui/record-bar";
@@ -99,7 +99,7 @@ export class RecordSession {
   readonly actions: RecordActions;
 
   private readonly host: RecordHost;
-  readonly controller: BrowserController;
+  readonly controller: PageController;
   private readonly recorder: Recorder;
   private readonly markup = new MarkupStore();
 
@@ -147,13 +147,13 @@ export class RecordSession {
   private sampleTimes: number[] | null = null;
   private toolbarGrab: Vec | null = null;
 
-  static async create(host: RecordHost, controller: BrowserController): Promise<RecordSession> {
+  static async create(host: RecordHost, controller: PageController): Promise<RecordSession> {
     const session = new RecordSession(host, controller);
     await session.recorder.start();
     return session;
   }
 
-  private constructor(host: RecordHost, controller: BrowserController) {
+  private constructor(host: RecordHost, controller: PageController) {
     this.host = host;
     this.controller = controller;
     this.surface = host.root.createSurface();

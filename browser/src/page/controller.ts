@@ -7,6 +7,7 @@ import type {
   WheelEvent,
 } from "pixel-react";
 import { normalizeUrl, urlHost } from "../url";
+import type { MirrorTarget, PageController } from "./page-controller";
 import { allowClipboardRead, persistentPartition } from "./browser-session";
 import { cursorShapeFor } from "./cursor";
 import { DevtoolsWindow } from "./devtools";
@@ -34,8 +35,9 @@ export interface ControllerOptions {
   appTabId: number | null;
 }
 
-export class BrowserController {
+export class BrowserController implements PageController {
   readonly surface: Surface;
+  readonly mirror: MirrorTarget | null = null;
   private readonly popupSurface: Surface;
   private readonly devtoolsSurface: Surface;
   private readonly window: BrowserWindow;

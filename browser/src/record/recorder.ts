@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { captureFilmstrip } from "pixel-react";
 import type { SurfaceCapture } from "pixel-react";
-import type { BrowserController } from "../page/controller";
+import type { PageController } from "../page/page-controller";
 
 export interface FrameMeta {
   tMs: number;
@@ -55,7 +55,7 @@ export class Recorder {
   onCap: (() => void) | null = null;
   captureError: string | null = null;
 
-  private readonly controller: BrowserController;
+  private readonly controller: PageController;
   private readonly framesDir: string;
   private capture: SurfaceCapture | null = null;
   private liveFrames: number[] = [];
@@ -66,7 +66,7 @@ export class Recorder {
   private stoppedFlag = false;
 
   constructor(
-    controller: BrowserController,
+    controller: PageController,
     readonly dir: string,
   ) {
     this.controller = controller;

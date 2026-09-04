@@ -362,6 +362,7 @@ impl Terminal {
         )?; // enable many reporting modes so we get info about mouse/keyboard
         io.out().flush()?;
 
+        let terminal_id = NEXT_TERMINAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut terminal = Self {
             io,
             saved,
@@ -379,12 +380,12 @@ impl Terminal {
             frame_files: Vec::new(),
             frame_seq: 0,
             wrapper,
-            image_id: frame_image_id(wrapper.relayed()),
+            image_id: frame_image_id(terminal_id),
             placeholders: None,
             wake_rx: None,
             waker: None,
             resize_slot: None,
-            terminal_id: NEXT_TERMINAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            terminal_id,
             clipboard_data: false,
             clip_read: None,
             color_scheme_updates: false,
@@ -486,7 +487,7 @@ impl Terminal {
     }
 
     fn probe_shared_memory(&mut self) -> io::Result<bool> {
-        let name = format!("/px-{}-q", std::process::id());
+        let name = format!("/px-{}-{}-q", std::process::id(), self.terminal_id);
         if write_shm(&name, &[0, 0, 0, 255]).is_err() {
             return Ok(false);
         }
@@ -1123,17 +1124,29 @@ enum FrameTransport {
 
 static NEXT_TERMINAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/**
- * need to think about this case harder 
- */
-fn frame_image_id(relayed: bool) -> u32 {
-    if !relayed {
-        return 1;
-    }
-    match std::process::id() & 0xff_ffff {
-        0 | SHM_PROBE_ID => SHM_PROBE_ID + 1,
-        id => id,
-    }
+/// ids ride in a placeholder cell's 24 bit colour under tmux, so they stay in 24 bits.
+/// Ids below this one are left for the probes.
+const FIRST_IMAGE_ID: u32 = FILE_PROBE_ID + 1;
+const IMAGE_ID_COUNT: u32 = 0xff_ffff - FIRST_IMAGE_ID + 1;
+
+/// One daemon draws many terminals, so every terminal needs its own image or panes
+/// overwrite each other's frames. Starting each process at its own id keeps terminals
+/// apart when two daemons draw into the same terminal.
+fn frame_image_id(terminal_id: u64) -> u32 {
+    image_id_at(process_image_base(std::process::id()), terminal_id)
+}
+
+fn image_id_at(base: u32, terminal_id: u64) -> u32 {
+    let count = u64::from(IMAGE_ID_COUNT);
+    FIRST_IMAGE_ID + ((u64::from(base) + terminal_id) % count) as u32
+}
+
+fn process_image_base(pid: u32) -> u32 {
+    let mut mixed = u64::from(pid).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed ^= mixed >> 29;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 32;
+    (mixed % u64::from(IMAGE_ID_COUNT)) as u32
 }
 
 fn parse_probe_reply(buf: &[u8], needle: &[u8]) -> Option<bool> {
@@ -2541,6 +2554,10 @@ mod tty_tests {
 
         assert_ne!(a.terminal_id, b.terminal_id);
         assert_ne!(a.shm_name(0), b.shm_name(0));
+        assert_ne!(
+            a.image_id, b.image_id,
+            "two views in one process must draw into their own image"
+        );
 
         use std::io::Write as _;
         master_a.write_all(b"\x1b[97;;97u").unwrap();
@@ -2564,6 +2581,42 @@ mod tty_tests {
             -1,
             "dropping a terminal must release its resize slot"
         );
+    }
+
+    #[test]
+    fn every_terminal_in_a_process_gets_its_own_image() {
+        let base = process_image_base(std::process::id());
+        let ids: Vec<u32> = (0..1000).map(|nth| image_id_at(base, nth)).collect();
+        let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "ids repeat, so panes would share a frame");
+        for id in ids {
+            assert!(id >= FIRST_IMAGE_ID, "id {id} collides with a probe");
+            assert!(id <= 0xff_ffff, "id {id} does not fit a placeholder colour");
+        }
+        assert_eq!(
+            image_id_at(IMAGE_ID_COUNT - 1, 1),
+            FIRST_IMAGE_ID,
+            "ids wrap back above the probes"
+        );
+    }
+
+    #[test]
+    fn two_processes_drawing_one_terminal_start_at_different_images() {
+        assert_ne!(process_image_base(1000), process_image_base(1001));
+        let bases: std::collections::HashSet<u32> = (1..500).map(process_image_base).collect();
+        assert_eq!(bases.len(), 499, "nearby pids must not share a starting image");
+    }
+
+    #[test]
+    fn tearing_down_a_view_deletes_only_its_own_image() {
+        let base = process_image_base(4242);
+        let (mine, neighbour) = (image_id_at(base, 0), image_id_at(base, 1));
+        for wrapper in [Wrapper::None, Wrapper::Tmux] {
+            let delete = String::from_utf8(crate::kitty::kitty_delete(mine, wrapper)).unwrap();
+            assert!(delete.contains(&format!("i={mine},")), "{delete}");
+            assert!(!delete.contains(&format!("i={neighbour},")), "{delete}");
+            assert!(!delete.contains("d=A"), "d=A wipes every pane's image: {delete}");
+        }
     }
 
     #[test]

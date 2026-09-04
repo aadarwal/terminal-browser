@@ -23,6 +23,7 @@ terminal-browser --split right # opens the browser in a split pane to the right
 terminal-browser open --ssh <user@host> <url> # performs all network requests through a remote server
 terminal-browser ls # lists open browsers
 terminal-browser action # an agent-browser compatible cli for interacting with open terminal-browsers
+terminal-browser --mirror # shows a tab from a browser you already have open
 ```
 
 
@@ -65,6 +66,38 @@ We use [electrons offscreen rendering API](https://www.electronjs.org/docs/lates
 After the browser engine starts and is displaying pixels in the terminal, it needs to be able to read user input for websites to actually work. terminal-browser listens to mouse clicks, mouse position, and keyboard events from the terminal, and then sends synthetic events to chromium based on that data. For any user input events that are not retrievable from the terminal, we read directly from the operating system using a background swift app to listen for input events (non intrusively). This is what allows terminal-browser to implement smooth scrolling, and listen to trackpad events (websites with infinite canvases work great inside terminal-browser!)
 
 The outer UI of the browser is implemented using a graphics engine built on top of rust. The actual UI is defined inside react with a custom react renderer, which allows us to build the UI for the browser using typescript. The UI of the outer browser and the browser content itself is all drawn to the same shared canvas inside the rust engine, which allows us to layer UI on top of the browser.
+
+### Mirror
+`terminal-browser --mirror` shows a tab from a browser that is already running, rather than
+starting a page of its own. In that browser open `chrome://inspect/#remote-debugging`, turn
+remote debugging on, then run terminal-browser and press Allow when the browser asks. Nothing
+needs restarting, and no launch flags are involved.
+
+```
+terminal-browser --mirror                       # the first tab that browser lists
+terminal-browser open --mirror --browser helium --split right
+terminal-browser open --mirror --target <id>    # an exact tab, ids come from terminal-browser ls
+terminal-browser open --mirror --new-tab example.com
+```
+
+terminal-browser finds the browser by reading the port it publishes in its profile directory,
+and knows helium, chrome, chromium, brave and edge. `--browser <name>` or `--user-data-dir <dir>`
+says which one when several are sharing. A browser too old for that switch can still be started
+with `--remote-debugging-port=9222` and mirrored with `--port 9222`, or attached to exactly with
+`--cdp <url>`.
+
+The mirrored tab keeps its own profile, sign ins, and downloads, because it is that browser's
+tab and not a copy of it. Closing the pane lets go of the tab; it never closes it. Without a
+url nothing is navigated, so mirroring never disturbs the page you were looking at.
+
+A mirrored tab is drawn from the pictures that browser sends, and its page belongs to that
+browser rather than to us, so the page keeps its own window size no matter how the pane is
+resized, and find, devtools, zoom and pasting images are not available on it.
+
+Every mirroring pane shares one connection to that browser, so it only asks permission once
+however many panes you open. `terminal-browser action` drives the page through agent-browser,
+which connects on its own, so the browser asks once more the first time you automate a
+mirrored tab.
 
 ### SSH
 The recommended way to use terminal-browser over ssh is running `terminal-browser --ssh <ssh arguments>`.

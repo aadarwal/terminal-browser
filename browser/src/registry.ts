@@ -39,6 +39,7 @@ export interface ControlHost {
   activateTab(id: number): boolean;
   closeTab(id: number): boolean;
   agentTouch(id: number): boolean;
+  markTab(id: number, token: string, on: boolean): Promise<boolean>;
   agentRelease(): void;
   tabs(): unknown;
   targets(): Promise<unknown>;
@@ -51,6 +52,8 @@ interface ControlRequest {
   url?: string;
   cwd?: string;
   tab?: number;
+  token?: string;
+  mark?: boolean;
 }
 
 export class Registry {
@@ -188,6 +191,16 @@ export class Registry {
         if (request.tab === undefined) throw new Error("close-tab needs a tab id");
         if (!this.host.closeTab(request.tab)) throw new Error(`no tab ${request.tab}`);
         return { ...this.record(), tabs: await this.host.targets() };
+      }
+      // agent-browser names tabs its own way, so we leave a token on the page for it to find
+      case "mark-tab": {
+        if (request.tab === undefined) throw new Error("mark-tab needs a tab id");
+        if (!request.token) throw new Error("mark-tab needs a token");
+        const on = request.mark !== false;
+        if (!(await this.host.markTab(request.tab, request.token, on))) {
+          throw new Error(`no tab ${request.tab}`);
+        }
+        return { marked: on };
       }
       case "agent-touch": {
         if (request.tab === undefined) throw new Error("agent-touch needs a tab id");

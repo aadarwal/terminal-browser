@@ -1,5 +1,8 @@
-import type { BrowserController } from "../page/controller";
+import { tabMarkProperty } from "pixel-store";
+
+import type { MirrorSpec } from "../mirror/spec";
 import type { DevtoolsAction } from "../page/devtools";
+import type { MirrorTarget, PageController } from "../page/page-controller";
 import { initialBrowserState } from "../page/types";
 import type { BrowserState } from "../page/types";
 import type { TabRow } from "../ui/types";
@@ -13,12 +16,13 @@ export interface TabApp {
 export interface TabOptions {
   app?: TabApp;
   partition?: string | null;
+  mirror?: MirrorSpec;
 }
 
 export interface Tab {
   readonly id: number;
   state: BrowserState;
-  controller: BrowserController;
+  controller: PageController;
   targetId: string | null;
   app: TabApp | null;
   agentControlAt: number | null;
@@ -33,16 +37,24 @@ export interface TabTarget {
   app?: TabApp | null;
   timeOrigin?: number | null;
   agentControlled: boolean;
+  mirror?: MirrorTarget | null;
 }
 
 
+/** every tab a mirroring session opens belongs to the browser it mirrors, not to us */
+export function tabOptionsIn(mirroring: MirrorSpec | null, options: TabOptions): TabOptions {
+  if (!mirroring || options.app || options.mirror) return options;
+  return { ...options, mirror: { ...mirroring, targetId: null, newTab: true } };
+}
+
 export interface TabHost {
+  tabOptions(options: TabOptions): TabOptions;
   createController(
     url: string,
     visible: boolean,
     onState: (state: BrowserState) => void,
     options: TabOptions & { tabId: number },
-  ): BrowserController;
+  ): PageController;
   onActivated(): void;
   onActiveState(state: BrowserState, urlChanged: boolean): void;
   onCursorChanged(): void;
@@ -50,7 +62,7 @@ export interface TabHost {
   onDevtoolsAction(action: DevtoolsAction): void;
   onPageMenu(params: Electron.ContextMenuParams): void;
   onTabsChanged(): void;
-  onTabOpened(opener: BrowserController, url: string): void;
+  onTabOpened(opener: PageController, url: string): void;
   onTabClosed(id: number): void;
   tabSwitchAllowed(): boolean;
   requestRender(): void;
@@ -77,7 +89,7 @@ export class TabManager {
     return this.tabs.find((tab) => tab.id === this.activeId) ?? null;
   }
 
-  get activeController(): BrowserController | null {
+  get activeController(): PageController | null {
     return this.active?.controller ?? null;
   }
 
@@ -90,7 +102,8 @@ export class TabManager {
   }
 
   
-  create(url: string, activate = true, options: TabOptions = {}): Tab {
+  create(url: string, activate = true, asked: TabOptions = {}): Tab {
+    const options = this.host.tabOptions(asked);
     const tab = {
       id: this.seq++,
       state: initialBrowserState(url),
@@ -183,6 +196,16 @@ export class TabManager {
     return true;
   }
 
+  /** leaves the caller's own token on the page, or takes it back off */
+  async mark(id: number, token: string, on: boolean): Promise<boolean> {
+    const tab = this.tabs.find((t) => t.id === id);
+    if (!tab) return false;
+    const key = JSON.stringify(tabMarkProperty(token));
+    const source = on ? `window[${key}] = true` : `delete window[${key}]`;
+    await tab.controller.runJs(`(() => { ${source}; return true; })()`);
+    return true;
+  }
+
   releaseAgentControl() {
     this.stopAgentSweep();
     let changed = false;
@@ -233,7 +256,7 @@ export class TabManager {
     return this.tabs.find((tab) => tab.controller.hasContents(contentsId)) ?? null;
   }
 
-  stateFor(controller: BrowserController): BrowserState | null {
+  stateFor(controller: PageController): BrowserState | null {
     return this.tabs.find((tab) => tab.controller === controller)?.state ?? null;
   }
 
@@ -262,6 +285,7 @@ export class TabManager {
       targetId: tab.targetId,
       app: tab.app,
       agentControlled: tab.agentControlAt != null,
+      mirror: tab.controller.mirror,
     }));
   }
 
@@ -278,12 +302,13 @@ export class TabManager {
           app: tab.app,
           timeOrigin: await tab.controller.fingerprint(),
           agentControlled: tab.agentControlAt != null,
+          mirror: tab.controller.mirror,
         };
       }),
     );
   }
 
-  eachController(fn: (controller: BrowserController) => void) {
+  eachController(fn: (controller: PageController) => void) {
     for (const tab of this.tabs) fn(tab.controller);
   }
 

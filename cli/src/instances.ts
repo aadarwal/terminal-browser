@@ -5,6 +5,11 @@ import { control } from "./control";
 import { instances } from "./registry";
 import type { InstanceRecord } from "./registry";
 
+export interface MirrorTarget {
+  endpoint: string;
+  targetId: string;
+}
+
 export interface TabTarget {
   id: number;
   url: string;
@@ -13,6 +18,7 @@ export interface TabTarget {
   targetId: string | null;
   app?: { name: string | null; id: string } | null;
   timeOrigin?: number | null;
+  mirror?: MirrorTarget | null;
 }
 
 export interface Browser extends InstanceRecord {

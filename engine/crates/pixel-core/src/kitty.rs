@@ -123,11 +123,8 @@ pub(crate) fn kitty_transmit_placed(
 }
 // verify this is needed later
 pub(crate) fn kitty_delete(image_id: u32, wrapper: Wrapper) -> Vec<u8> {
-    if wrapper.relayed() {
-        wrapper.wrap(format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\").as_bytes())
-    } else {
-        b"\x1b_Ga=d,d=A,q=2\x1b\\".to_vec()
-    }
+    // never d=A: panes sharing a terminal would wipe each other's frames
+    wrapper.wrap(format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\").as_bytes())
 }
 
 const PLACEHOLDER: char = '\u{10EEEE}';
@@ -262,8 +259,8 @@ mod tests {
     }
 
     #[test]
-    fn delete_is_scoped_to_our_image_when_relayed() {
-        assert_eq!(kitty_delete(5, Wrapper::None), b"\x1b_Ga=d,d=A,q=2\x1b\\");
+    fn delete_is_scoped_to_our_image() {
+        assert_eq!(kitty_delete(5, Wrapper::None), b"\x1b_Ga=d,d=I,i=5,q=2\x1b\\");
         assert_eq!(
             kitty_delete(5, Wrapper::Tmux),
             b"\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=5,q=2\x1b\x1b\\\x1b\\"

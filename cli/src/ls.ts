@@ -49,6 +49,7 @@ function render(list: Listed[]): string {
       lines.push(`  ${mark} ${tab.id}  ${label}`);
       lines.push(`      ${tab.url}`);
       lines.push(`      target ${tab.targetId ?? "pending"}`);
+      if (tab.mirror) lines.push(`      mirroring ${tab.mirror.endpoint}`);
     }
   }
   return `${lines.join("\n")}\n`;

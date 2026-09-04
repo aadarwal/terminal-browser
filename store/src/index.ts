@@ -17,6 +17,8 @@ export { listInstances, removeInstance, upsertInstance } from "./instances";
 export { lastUrl, setLastUrl } from "./app-state";
 export {
   INTEROP_APPS_DIR,
+  TAB_MARK_PROPERTY,
+  tabMarkProperty,
   INTEROP_INSTANCES_DIR,
   INTEROP_PROTOCOL_VERSIONS,
   advertiseInstance,

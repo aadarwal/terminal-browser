@@ -20,6 +20,10 @@ import { Grab, reactGrabPreloadPath } from "../grab/grab";
 import { AgentPaneFinder } from "../grab/target";
 import type { DownloadProgress } from "../page/browser-session";
 import { BrowserController } from "../page/controller";
+import type { PageController } from "../page/page-controller";
+import { MirrorController } from "../mirror/controller";
+import { mirrorFromArgv } from "../mirror/spec";
+import type { MirrorSpec } from "../mirror/spec";
 import { initOffscreenMode } from "../page/offscreen";
 import { initialBrowserState } from "../page/types";
 import type { BrowserState, BrowserSurfaceLayout } from "../page/types";
@@ -54,7 +58,7 @@ import type { KeyBinding } from "./keybindings";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
 import type { DevtoolsPlacement } from "./layout";
 import { fetchSuggestions } from "./suggest";
-import { TabManager } from "./tabs";
+import { TabManager, tabOptionsIn } from "./tabs";
 import type { TabApp } from "./tabs";
 import type { NewTabSuggestion } from "../ui/types";
 
@@ -201,6 +205,7 @@ class Session {
   private readonly socksPort: number | null;
   private readonly preload: string | null;
   private readonly mainScript: string | null;
+  private readonly mirroring: MirrorSpec | null;
   private readonly onThemeRequest = (event: IpcMainEvent) => {
     if (!this.ownsSender(event)) return;
     const payload = this.themePayload();
@@ -269,8 +274,8 @@ class Session {
   private toast: { text: string; detail?: string; failed: boolean; alert: boolean } | null =
     null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
-  private records = new Map<BrowserController, RecordSession>();
-  private grabs = new Map<BrowserController, Grab>();
+  private records = new Map<PageController, RecordSession>();
+  private grabs = new Map<PageController, Grab>();
   private readonly grabIcon = bundledAsset(path.join("react-grab", "logo.png"));
   private readonly agentPanes: AgentPaneFinder;
   private shownRecord: RecordSession | null = null;
@@ -309,32 +314,36 @@ class Session {
       (sshTarget ? `ssh-${sshTarget.replace(/[^A-Za-z0-9@._-]/g, "-")}` : null);
     this.preload = flagValue(this.argv, "--preload");
     this.mainScript = flagValue(this.argv, "--main-script");
-    this.fallbackState = initialBrowserState(this.initialUrl());
+    this.mirroring = mirrorFromArgv(this.argv);
+    this.fallbackState = initialBrowserState(this.mirroring ? "" : this.initialUrl());
     registerPreloadOnce(
       configureBrowserSession(this.partition, (progress) => this.showDownload(progress)),
       reactGrabPreloadPath(),
     );
     this.tabs = new TabManager(
       {
+        tabOptions: (options) => tabOptionsIn(this.mirroring, options),
         createController: (url, visible, onState, options) =>
-          new BrowserController(
-            this.root!.createSurface(),
-            this.popupSurface!,
-            this.devtoolsSurface!,
-            this.surfaceLayout!,
-            url,
-            {
-              cwd: this.ctx.cwd,
-              background: this.windowBg,
-              visible,
-              partition: options.partition !== undefined ? options.partition : this.partition,
-              tabsAsPopups: this.sessionFlags.tabsAsPopups || options.app != null,
-              clipboardRead: this.sessionFlags.clipboardRead || options.app != null,
-              sessionKey: this.ctx.key,
-              appTabId: options.app ? options.tabId : null,
-            },
-            onState,
-          ),
+          options.mirror
+            ? this.createMirrorController(options.mirror, url, visible, onState)
+            : new BrowserController(
+                this.root!.createSurface(),
+                this.popupSurface!,
+                this.devtoolsSurface!,
+                this.surfaceLayout!,
+                url,
+                {
+                  cwd: this.ctx.cwd,
+                  background: this.windowBg,
+                  visible,
+                  partition: options.partition !== undefined ? options.partition : this.partition,
+                  tabsAsPopups: this.sessionFlags.tabsAsPopups || options.app != null,
+                  clipboardRead: this.sessionFlags.clipboardRead || options.app != null,
+                  sessionKey: this.ctx.key,
+                  appTabId: options.app ? options.tabId : null,
+                },
+                onState,
+              ),
         onActivated: () => {
           this.browserFocused = true;
           this.pageMenu = null;
@@ -430,7 +439,9 @@ class Session {
     this.root.setPointerShape("default");
     this.windowBg = this.themeBackground();
     this.installEmbedderApi();
-    if (this.appIdentity) {
+    if (this.mirroring) {
+      this.tabs.create(this.explicitUrl() ?? "", true, { mirror: this.mirroring });
+    } else if (this.appIdentity) {
       this.tabs.create(this.fallbackState.url, true, { app: this.appIdentity });
     } else {
       this.tabs.create(this.fallbackState.url);
@@ -465,6 +476,7 @@ class Session {
         return true;
       },
       agentTouch: (id) => this.tabs.touchAgentControl(id),
+      markTab: (id, token, on) => this.tabs.mark(id, token, on),
       agentRelease: () => this.tabs.releaseAgentControl(),
       viewport: () =>
         this.root ? { width: this.root.info.width, height: this.root.info.height } : null,
@@ -474,6 +486,33 @@ class Session {
     this.registry.setCdpPort(this.ctx.cdpPort);
     void this.findOwnPane();
     this.render();
+  }
+
+  private createMirrorController(
+    mirror: MirrorSpec,
+    url: string,
+    visible: boolean,
+    onState: (state: BrowserState) => void,
+  ): PageController {
+    const controller = new MirrorController(
+      this.root!.createSurface(),
+      this.surfaceLayout!,
+      {
+        endpoint: mirror.endpoint,
+        targetId: mirror.targetId,
+        newTab: mirror.newTab,
+        url: url || null,
+        cwd: this.ctx.cwd,
+        background: this.windowBg,
+        visible,
+      },
+      onState,
+    );
+    controller.onError = (message) => {
+      process.stderr.write(`terminal-browser mirror: ${message}\n`);
+      this.showToast(message, "failed");
+    };
+    return controller;
   }
 
   private findOwnPane(): Promise<Pane | null> {
@@ -1389,7 +1428,7 @@ class Session {
     return controller ? this.grabs.get(controller) ?? null : null;
   }
 
-  private grabFor(controller: BrowserController): Grab {
+  private grabFor(controller: PageController): Grab {
     let grab = this.grabs.get(controller);
     if (!grab) {
       grab = new Grab(controller, {
@@ -1733,8 +1772,12 @@ class Session {
     return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).scaleFactor;
   }
 
+  private explicitUrl(): string | null {
+    return this.argv.find((argument) => !argument.startsWith("-")) ?? null;
+  }
+
   private initialUrl(): string {
-    const arg = this.argv.find((argument) => !argument.startsWith("-"));
+    const arg = this.explicitUrl();
     if (arg) return arg;
     try {
       const last = lastUrl()?.trim();

@@ -14,8 +14,8 @@ import type { PopupWindow } from "../page/popup";
 import { initialBrowserState } from "../page/types";
 import type { BrowserState, BrowserSurfaceLayout } from "../page/types";
 import { normalizeUrl } from "../url";
-import { CdpConnection, detachCommands, listTargets, pickTarget } from "./cdp";
-import type { CdpEndpoint } from "./cdp";
+import { detachCommands, endpointLabel, leaseConnection, pickTarget } from "./cdp";
+import type { CdpConnection, CdpEndpoint, ConnectionLease } from "./cdp";
 import {
   fillsCompletely,
   fitFrame,
@@ -70,7 +70,10 @@ export class MirrorController implements PageController {
   private readonly emitHandlers = new Map<string, (data: unknown) => void>();
   private readonly cdpEventHandlers = new Map<string, (params: unknown) => void>();
   private connection: CdpConnection | null = null;
+  private lease: ConnectionLease | null = null;
   private readonly subscribed = new Set<string>();
+  private readonly listening: { sessionId: string | null; method: string; handler: (params: unknown) => void }[] = [];
+  private forgetClose: (() => void) | null = null;
   private sessionId: string | null = null;
   private pinnedTarget: string | null = null;
   private ready: Promise<void> | null = null;
@@ -114,7 +117,7 @@ export class MirrorController implements PageController {
 
   get mirror(): MirrorTarget | null {
     return this.pinnedTarget
-      ? { endpoint: this.options.endpoint.origin, targetId: this.pinnedTarget }
+      ? { endpoint: endpointLabel(this.options.endpoint), targetId: this.pinnedTarget }
       : null;
   }
 
@@ -124,10 +127,12 @@ export class MirrorController implements PageController {
   }
 
   private async connect(): Promise<void> {
-    const connection = await CdpConnection.open(this.options.endpoint);
+    const lease = await leaseConnection(this.options.endpoint);
+    const connection = lease.connection;
+    this.lease = lease;
     if (this.gaveUp(connection, null)) return;
     this.connection = connection;
-    connection.onClose = () => this.remoteGone();
+    this.forgetClose = connection.onClosed(() => this.remoteGone());
     const targetId = await this.resolveTarget(connection);
     if (this.gaveUp(connection, null)) return;
     this.pinnedTarget = targetId;
@@ -138,11 +143,11 @@ export class MirrorController implements PageController {
     if (!attached.sessionId) throw new Error(`could not attach to tab ${targetId}`);
     if (this.gaveUp(connection, attached.sessionId)) return;
     this.sessionId = attached.sessionId;
-    connection.on(null, "Target.detachedFromTarget", (params) => {
+    this.listen(null, "Target.detachedFromTarget", (params) => {
       const detached = params as { sessionId?: string };
       if (detached.sessionId === this.sessionId) this.remoteGone();
     });
-    connection.on(null, "Target.targetInfoChanged", (params) => {
+    this.listen(null, "Target.targetInfoChanged", (params) => {
       const info = (params as { targetInfo?: { targetId?: string; url?: string; title?: string } })
         .targetInfo;
       if (!info || info.targetId !== this.pinnedTarget) return;
@@ -152,11 +157,11 @@ export class MirrorController implements PageController {
     await this.session("Page.enable");
     await this.session("Runtime.enable");
     await this.session("Runtime.addBinding", { name: "__pixelEmit" });
-    connection.on(this.sessionId, "Runtime.bindingCalled", (params) => this.binding(params));
-    connection.on(this.sessionId, "Page.screencastFrame", (params) => this.frame(params));
+    this.listen(this.sessionId, "Runtime.bindingCalled", (params) => this.binding(params));
+    this.listen(this.sessionId, "Page.screencastFrame", (params) => this.frame(params));
     for (const method of PAGE_EVENTS) {
       this.subscribed.add(method);
-      connection.on(this.sessionId, method, (params) => {
+      this.listen(this.sessionId, method, (params) => {
         this.cdpEventHandlers.get(method)?.(params);
         void this.readPage();
       });
@@ -175,7 +180,8 @@ export class MirrorController implements PageController {
     if (!this.stopped) return false;
     this.connection = null;
     this.sessionId = null;
-    void this.letGo(connection, sessionId).then(() => connection.close());
+    this.unlisten(connection);
+    void this.letGo(connection, sessionId).then(() => this.releaseConnection());
     return true;
   }
 
@@ -187,8 +193,8 @@ export class MirrorController implements PageController {
       if (!created.targetId) throw new Error("that browser would not open a tab");
       return created.targetId;
     }
-    const targets = await listTargets(this.options.endpoint);
-    return pickTarget(targets, this.options.targetId).id;
+    // asked over this connection, because a browser that asks for permission serves no http
+    return pickTarget(await connection.targets(), this.options.targetId).id;
   }
 
   private session(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -318,8 +324,8 @@ export class MirrorController implements PageController {
     const connection = this.connection;
     this.connection = null;
     this.sessionId = null;
+    if (connection) this.unlisten(connection);
     this.stop();
-    connection?.close();
     this.onClosed?.();
   }
 
@@ -423,9 +429,17 @@ export class MirrorController implements PageController {
   private subscribe(method: string): void {
     if (!this.connection || !this.sessionId || this.subscribed.has(method)) return;
     this.subscribed.add(method);
-    this.connection.on(this.sessionId, method, (params) =>
-      this.cdpEventHandlers.get(method)?.(params),
-    );
+    this.listen(this.sessionId, method, (params) => this.cdpEventHandlers.get(method)?.(params));
+  }
+
+  /** the connection outlives this view when other panes share it, so we take our handlers back */
+  private listen(
+    sessionId: string | null,
+    method: string,
+    handler: (params: unknown) => void,
+  ): void {
+    this.connection?.on(sessionId, method, handler);
+    this.listening.push({ sessionId, method, handler });
   }
 
   pinFrameRate(): void {}
@@ -549,9 +563,25 @@ export class MirrorController implements PageController {
     this.connection = null;
     this.sessionId = null;
     this.surface.close();
-    if (!connection) return;
-    connection.onClose = null;
-    void this.letGo(connection, sessionId).then(() => connection.close());
+    if (!connection) {
+      this.releaseConnection();
+      return;
+    }
+    this.unlisten(connection);
+    void this.letGo(connection, sessionId).then(() => this.releaseConnection());
+  }
+
+  private unlisten(connection: CdpConnection): void {
+    this.forgetClose?.();
+    this.forgetClose = null;
+    for (const { sessionId, method, handler } of this.listening.splice(0)) {
+      connection.off(sessionId, method, handler);
+    }
+  }
+
+  private releaseConnection(): void {
+    this.lease?.release();
+    this.lease = null;
   }
 
   private async letGo(connection: CdpConnection, sessionId: string | null): Promise<void> {

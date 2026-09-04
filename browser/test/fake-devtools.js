@@ -1,5 +1,5 @@
-// A stand in for a browser started with --remote-debugging-port, so the mirror can be
-// exercised without one. Only the server half of the websocket framing lives here.
+// A stand in for a browser started with debugging on, so the mirror can be exercised without
+// one. Only the server half of the websocket framing lives here.
 const crypto = require("node:crypto");
 const http = require("node:http");
 
@@ -26,6 +26,7 @@ function sized(bytes, value) {
 /** reads the masked frames a client sends, one message at a time */
 function clientMessages(buffer) {
   const messages = [];
+  let closed = false;
   let rest = buffer;
   for (;;) {
     if (rest.length < 2) break;
@@ -50,8 +51,9 @@ function clientMessages(buffer) {
     if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
     rest = rest.subarray(at + length);
     if (opcode === 0x1) messages.push(payload.toString("utf8"));
+    if (opcode === 0x8) closed = true;
   }
-  return { messages, rest };
+  return { messages, rest, closed };
 }
 
 async function fakeBrowser(options = {}) {
@@ -59,17 +61,34 @@ async function fakeBrowser(options = {}) {
     { id: "page-1", type: "page", title: "one", url: "https://example.com" },
   ];
   const received = [];
-  let live = null;
+  const asked = [];
+  const sockets = [];
+  let upgrades = 0;
   const server = http.createServer((request, response) => {
-    const port = server.address().port;
+    asked.push(request.url);
+    // a browser that asks its human for permission serves the socket and nothing else
+    if (options.approvalOnly) {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
     const body =
       request.url === "/json/version"
-        ? { webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/fake` }
+        ? { webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/fake` }
         : targets;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
   });
   server.on("upgrade", (request, socket) => {
+    upgrades += 1;
+    sockets.push(socket);
+    socket.on("error", () => {});
+    if (options.consent === "deny") {
+      socket.destroy();
+      return;
+    }
+    // a prompt nobody answers leaves the handshake unanswered
+    if (options.consent === "hang") return;
     const accept = crypto
       .createHash("sha1")
       .update(`${request.headers["sec-websocket-key"]}${GUID}`)
@@ -78,9 +97,7 @@ async function fakeBrowser(options = {}) {
       "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
         `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
-    live = socket;
     let pending = Buffer.alloc(0);
-    socket.on("error", () => {});
     socket.on("data", (chunk) => {
       const read = clientMessages(Buffer.concat([pending, chunk]));
       pending = read.rest;
@@ -88,20 +105,28 @@ async function fakeBrowser(options = {}) {
         const message = JSON.parse(text);
         received.push(message);
         const reply = (options.answer ?? defaultAnswer)(message);
-        if (reply) send(reply);
+        if (reply) write(socket, reply);
       }
+      if (read.closed) socket.destroy();
     });
   });
-  const send = (value) => live.write(serverFrame(JSON.stringify(value)));
+  const write = (socket, value) => {
+    if (!socket.destroyed) socket.write(serverFrame(JSON.stringify(value)));
+  };
+  const latest = () => sockets.filter((socket) => !socket.destroyed).at(-1);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: server.address().port,
+    socketUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/fake`,
+    targets,
     received,
-    send,
-    drop: () => live.destroy(),
+    asked,
+    upgrades: () => upgrades,
+    send: (value) => write(latest(), value),
+    drop: () => latest()?.destroy(),
     close: () =>
       new Promise((resolve) => {
-        live?.destroy();
+        for (const socket of sockets) socket.destroy();
         server.closeAllConnections();
         server.close(resolve);
       }),
@@ -111,6 +136,17 @@ async function fakeBrowser(options = {}) {
 function defaultAnswer(request) {
   if (request.method === "Target.attachToTarget") {
     return { id: request.id, result: { sessionId: "session-1" } };
+  }
+  if (request.method === "Target.getTargets") {
+    return {
+      id: request.id,
+      result: {
+        targetInfos: [
+          { targetId: "page-1", type: "page", title: "one", url: "https://example.com" },
+          { targetId: "worker", type: "service_worker", title: "", url: "https://example.com/sw" },
+        ],
+      },
+    };
   }
   if (request.method === "Boom.throw") {
     return { id: request.id, error: { message: "no such method" } };

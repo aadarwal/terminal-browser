@@ -9,6 +9,7 @@ import type { Terminal } from "pixel-terminals";
 import { control } from "./control";
 import { browsers, describe, recordKey, targets } from "./instances";
 import type { Browser, TabTarget } from "./instances";
+import { isSocketEndpoint, portOf } from "./mirror";
 
 const DIST_ROOT = process.env.TERMINAL_BROWSER_DIST_ROOT ?? null;
 
@@ -63,18 +64,20 @@ export function sessionName(browser: Browser, tab: TabTarget): string {
   return `tbm-${crypto.createHash("sha1").update(of).digest("hex").slice(0, 12)}`;
 }
 
-function mirrorPort(endpoint: string): number {
-  const port = Number(new URL(endpoint).port);
-  if (!Number.isInteger(port) || port < 1) throw new Error(`${endpoint} has no port`);
-  return port;
-}
-
-function debugPort(browser: Browser, tab: TabTarget): number {
-  if (tab.mirror) return mirrorPort(tab.mirror.endpoint);
+/**
+ * What agent-browser should connect to. A mirrored browser hands out an exact websocket, and
+ * asking it for anything over http would either fail or ask its human for permission again.
+ */
+export function debugEndpoint(browser: Browser, tab: TabTarget): string {
+  if (tab.mirror) {
+    const endpoint = tab.mirror.endpoint;
+    if (isSocketEndpoint(endpoint)) return endpoint;
+    return String(portOf(endpoint));
+  }
   if (browser.cdpPort === null) {
     throw new Error(`browser ${recordKey(browser)} has no debugging port`);
   }
-  return browser.cdpPort;
+  return String(browser.cdpPort);
 }
 
 function childEnv(): NodeJS.ProcessEnv {
@@ -125,29 +128,49 @@ function withReason(message: string, stdout: string): string {
   return reason ? `${message}: ${reason}` : message;
 }
 
-function agentTabs(binary: string, browser: Browser, tab: TabTarget): AgentTab[] {
-  const session = sessionName(browser, tab);
-  const port = String(debugPort(browser, tab));
-  const listing = runAgent(binary, ["--session", session, "--cdp", port, "tab", "list", "--json"]);
+export interface AgentRun {
+  status: number;
+  stdout: string;
+}
+
+/**
+ * A browser that asks its human before sharing a tab asks again for every connection, so a
+ * refused websocket is reported rather than knocked on a second time.
+ */
+export function listAgentTabs(
+  session: string,
+  endpoint: string,
+  run: (args: string[]) => AgentRun,
+): AgentTab[] {
+  const listing = run(["--session", session, "--cdp", endpoint, "tab", "list", "--json"]);
   if (listing.status === 0) {
     try {
       return parseTabs(listing.stdout);
     } catch {}
   }
-  const reconnect = runAgent(binary, ["--session", session, "connect", port, "--json"]);
-  if (reconnect.status !== 0) {
+  if (isSocketEndpoint(endpoint)) {
     throw new Error(
-      withReason(
-        `could not connect agent-browser to ${recordKey(browser)} on port ${port}`,
-        reconnect.stdout,
-      ),
+      withReason(`agent-browser could not attach to ${endpoint}`, listing.stdout) +
+        "\n\nThe browser asks before sharing a tab with anything, so try again and press Allow.",
     );
   }
-  const retry = runAgent(binary, ["--session", session, "tab", "list", "--json"]);
+  const reconnect = run(["--session", session, "connect", endpoint, "--json"]);
+  if (reconnect.status !== 0) {
+    throw new Error(
+      withReason(`could not connect agent-browser on ${endpoint}`, reconnect.stdout),
+    );
+  }
+  const retry = run(["--session", session, "tab", "list", "--json"]);
   if (retry.status !== 0) {
     throw new Error(withReason("agent-browser could not list tabs", retry.stdout));
   }
   return parseTabs(retry.stdout);
+}
+
+function agentTabs(binary: string, browser: Browser, tab: TabTarget): AgentTab[] {
+  return listAgentTabs(sessionName(browser, tab), debugEndpoint(browser, tab), (args) =>
+    runAgent(binary, args),
+  );
 }
 
 function matchTab(
@@ -360,7 +383,7 @@ export async function actionCommand(terminal: Terminal | null, options: ActionOp
     return 0;
   }
 
-  debugPort(browser, tab);
+  debugEndpoint(browser, tab);
   if (!tab.targetId) {
     throw new Error(`tab ${tab.id} has no CDP target yet — is the page still starting?`);
   }

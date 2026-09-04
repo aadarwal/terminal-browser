@@ -3,7 +3,14 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const { AGENT_SOCKETS_DIR, tabMarkProperty } = require("pixel-store");
-const { agentError, findMarkedTab, probeOrder, sessionName } = require("../dist/action.js");
+const {
+  agentError,
+  debugEndpoint,
+  findMarkedTab,
+  listAgentTabs,
+  probeOrder,
+  sessionName,
+} = require("../dist/action.js");
 
 const browser = { key: "41587-1", pid: 41587, socket: "/tmp/41587-1.sock" };
 const mirrored = {
@@ -85,4 +92,47 @@ test("what agent-browser said went wrong is what we repeat", () => {
   assert.equal(agentError('{"ok":false,"error":"socket path too long"}'), "socket path too long");
   assert.equal(agentError("not json at all\n"), "not json at all");
   assert.equal(agentError(""), "");
+});
+
+test("agent-browser is pointed at the exact endpoint the pane is attached to", () => {
+  const socket = "ws://127.0.0.1:18744/devtools/browser/91D9-46";
+  assert.equal(debugEndpoint(browser, { ...mirrored, mirror: { endpoint: socket, targetId: "x" } }), socket);
+  assert.equal(
+    debugEndpoint(browser, { ...mirrored, mirror: { endpoint: "http://127.0.0.1:9222", targetId: "x" } }),
+    "9222",
+    "a browser started with a port is still reached by port",
+  );
+  assert.equal(debugEndpoint({ ...browser, cdpPort: 53309 }, own), "53309");
+  assert.throws(() => debugEndpoint({ ...browser, cdpPort: null }, own), /no debugging port/);
+});
+
+test("a refused websocket is reported instead of knocking again", () => {
+  const socket = "ws://127.0.0.1:18744/devtools/browser/91D9-46";
+  const tries = [];
+  assert.throws(
+    () =>
+      listAgentTabs("tbm-1", socket, (args) => {
+        tries.push(args);
+        return { status: 1, stdout: '{"error":"connection refused by browser"}' };
+      }),
+    (error) => {
+      assert.match(error.message, /could not attach to ws:\/\/127\.0\.0\.1:18744/);
+      assert.match(error.message, /connection refused by browser/);
+      assert.match(error.message, /press Allow/);
+      return true;
+    },
+  );
+  assert.equal(tries.length, 1, "asking twice would prompt the human twice");
+});
+
+test("a browser reached by port is still reconnected to when its session went stale", () => {
+  const tries = [];
+  const tabs = listAgentTabs("terminal-browser-1", "9222", (args) => {
+    tries.push(args[args.indexOf("--session") + 2]);
+    if (tries.length === 1) return { status: 1, stdout: '{"error":"no session"}' };
+    if (tries.length === 2) return { status: 0, stdout: "{}" };
+    return { status: 0, stdout: JSON.stringify({ data: { tabs: [{ tabId: "t1", url: "u" }] } }) };
+  });
+  assert.deepEqual(tries, ["--cdp", "connect", "tab"]);
+  assert.deepEqual(tabs.map((tab) => tab.tabId), ["t1"]);
 });

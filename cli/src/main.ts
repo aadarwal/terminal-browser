@@ -33,7 +33,7 @@ import { browsers, describe, recordKey } from "./instances";
 import type { Browser } from "./instances";
 import { findHosts, openInHost } from "./interop";
 import { lsCommand } from "./ls";
-import { checkMirrorEndpoint, mirrorArgv, takeMirrorFlags } from "./mirror";
+import { mirrorArgv, resolveMirror, takeMirrorFlags } from "./mirror";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -504,7 +504,7 @@ const BROWSER_FLAGS = [
   "--split-dir=",
   "--parent-tty=",
   "--mirror",
-  "--mirror-port=",
+  "--mirror-cdp=",
   "--mirror-target=",
   "--mirror-new-tab",
 ];
@@ -597,10 +597,10 @@ async function openCommand(args: string[]) {
   const noMerge = takeBoolFlag(args, "--no-merge") || mergeDisabled();
   if (size !== null && !split) fail("--size only applies to a split (--split <direction>)");
   takeSshFlags(args);
-  let mirror: ReturnType<typeof takeMirrorFlags> = null;
+  let mirror: Awaited<ReturnType<typeof resolveMirror>> | null = null;
   try {
-    mirror = takeMirrorFlags(args);
-    if (mirror) await checkMirrorEndpoint(mirror);
+    const asked = takeMirrorFlags(args);
+    if (asked) mirror = await resolveMirror(asked);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }

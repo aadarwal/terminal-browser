@@ -69,15 +69,22 @@ The outer UI of the browser is implemented using a graphics engine built on top 
 
 ### Mirror
 `terminal-browser --mirror` shows a tab from a browser that is already running, rather than
-starting a page of its own. Start that browser with a debugging port:
+starting a page of its own. In that browser open `chrome://inspect/#remote-debugging`, turn
+remote debugging on, then run terminal-browser and press Allow when the browser asks. Nothing
+needs restarting, and no launch flags are involved.
 
 ```
-chromium --remote-debugging-port=9222
 terminal-browser --mirror                       # the first tab that browser lists
-terminal-browser open --mirror --port 9222 --split right
+terminal-browser open --mirror --browser helium --split right
 terminal-browser open --mirror --target <id>    # an exact tab, ids come from terminal-browser ls
 terminal-browser open --mirror --new-tab example.com
 ```
+
+terminal-browser finds the browser by reading the port it publishes in its profile directory,
+and knows helium, chrome, chromium, brave and edge. `--browser <name>` or `--user-data-dir <dir>`
+says which one when several are sharing. A browser too old for that switch can still be started
+with `--remote-debugging-port=9222` and mirrored with `--port 9222`, or attached to exactly with
+`--cdp <url>`.
 
 The mirrored tab keeps its own profile, sign ins, and downloads, because it is that browser's
 tab and not a copy of it. Closing the pane lets go of the tab; it never closes it. Without a
@@ -86,6 +93,11 @@ url nothing is navigated, so mirroring never disturbs the page you were looking 
 A mirrored tab is drawn from the pictures that browser sends, and its page belongs to that
 browser rather than to us, so the page keeps its own window size no matter how the pane is
 resized, and find, devtools, zoom and pasting images are not available on it.
+
+Every mirroring pane shares one connection to that browser, so it only asks permission once
+however many panes you open. `terminal-browser action` drives the page through agent-browser,
+which connects on its own, so the browser asks once more the first time you automate a
+mirrored tab.
 
 ### SSH
 The recommended way to use terminal-browser over ssh is running `terminal-browser --ssh <ssh arguments>`.

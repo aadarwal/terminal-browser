@@ -49,14 +49,24 @@ Options:
   --app-id=<id>         The identifier of the application
   --no-merge            Do not open the terminal-browser instance as a tab in a neighbor terminal-browser
   --mirror              Show a tab from a browser you already have open, instead of
-                        starting a page of our own. That browser must have been
-                        started with --remote-debugging-port. Closing this pane lets
-                        go of the tab, it never closes it.
-  --port <port>         Which debugging port to mirror (default 9222)
-  --target <id>         Mirror this exact tab (ids come from terminal-browser ls, or
-                        from http://127.0.0.1:<port>/json/list). Without it the first
-                        tab that browser lists is mirrored.
+                        starting a page of our own. Closing this pane lets go of the
+                        tab, it never closes it.
+  --browser <name>      Which browser to mirror: helium, chrome, chromium, brave, edge
+  --user-data-dir <dir> Mirror the browser running from this profile directory
+  --cdp <url>           Attach to this exact endpoint, either the browser's websocket
+                        (ws://127.0.0.1:<port>/devtools/browser/<id>) or http://127.0.0.1:<port>
+  --port <port>         Mirror a browser started with --remote-debugging-port=<port>
+  --target <id>         Mirror this exact tab (ids come from terminal-browser ls).
+                        Without it the first tab that browser lists is mirrored.
   --new-tab             Mirror a fresh tab in that browser rather than one already open
+
+To mirror a browser, open chrome://inspect/#remote-debugging in it and turn remote debugging
+on, then run terminal-browser --mirror and press Allow when the browser asks. Nothing needs
+restarting, and terminal-browser finds the browser on its own. Tabs opened in a mirroring
+pane are opened in that browser too, so they keep its logins.
+
+Mirroring panes share one connection, so the browser only asks once however many you open.
+terminal-browser action connects separately, so it asks once more the first time you use it.
 
 A mirrored page belongs to the other browser, so it keeps its own window size, and find,
 devtools, zoom and pasting images are not available on it.
@@ -68,7 +78,7 @@ Examples:
   terminal-browser open github.com/zenbu-labs --split down --size 0.4
   terminal-browser open --ssh dev@build-box localhost:8080
   terminal-browser --mirror
-  terminal-browser open --mirror --port 9222 --split right
+  terminal-browser open --mirror --browser helium --split right
   terminal-browser open --mirror --new-tab example.com
 `,
   },

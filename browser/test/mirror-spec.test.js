@@ -5,22 +5,32 @@ const { detachCommands } = require("../dist/mirror/cdp.js");
 const { mirrorFromArgv } = require("../dist/mirror/spec.js");
 const { tabOptionsIn } = require("../dist/session/tabs.js");
 
+const SOCKET = "ws://127.0.0.1:18744/devtools/browser/91D9-46";
+
 test("a session only mirrors when it was asked to", () => {
   assert.equal(mirrorFromArgv(["https://example.com"]), null);
-  assert.equal(mirrorFromArgv(["--mirror-port=9222"]), null, "a port alone mirrors nothing");
+  assert.equal(mirrorFromArgv([`--mirror-cdp=${SOCKET}`]), null, "an endpoint alone mirrors nothing");
 });
 
 test("the flags the cli passes describe the browser to attach to", () => {
-  assert.deepEqual(mirrorFromArgv(["--mirror", "--mirror-port=9222"]), {
-    endpoint: { host: "127.0.0.1", port: 9222, origin: "http://127.0.0.1:9222" },
+  assert.deepEqual(mirrorFromArgv(["--mirror", `--mirror-cdp=${SOCKET}`]), {
+    endpoint: { host: "127.0.0.1", port: 18744, socketUrl: SOCKET },
     targetId: null,
     newTab: false,
   });
-  const pinned = mirrorFromArgv(["--mirror", "--mirror-port=9333", "--mirror-target=page-7"]);
-  assert.equal(pinned.endpoint.origin, "http://127.0.0.1:9333");
+  const pinned = mirrorFromArgv([
+    "--mirror",
+    "--mirror-cdp=http://127.0.0.1:9333",
+    "--mirror-target=page-7",
+  ]);
+  assert.deepEqual(pinned.endpoint, { host: "127.0.0.1", port: 9333, socketUrl: null });
   assert.equal(pinned.targetId, "page-7");
-  assert.equal(mirrorFromArgv(["--mirror", "--mirror-new-tab"]).newTab, true);
-  assert.equal(mirrorFromArgv(["--mirror"]).endpoint.port, 9222, "9222 is the default port");
+  assert.equal(
+    mirrorFromArgv(["--mirror", `--mirror-cdp=${SOCKET}`, "--mirror-new-tab"]).newTab,
+    true,
+  );
+  // the cli settles which browser this is about, so the browser never has to guess
+  assert.throws(() => mirrorFromArgv(["--mirror"]), /--mirror-cdp=/);
 });
 
 test("closing the view hands the tab back instead of closing it", () => {
@@ -40,7 +50,11 @@ test("closing the view hands the tab back instead of closing it", () => {
 });
 
 test("every tab a mirroring session opens stays in the browser it mirrors", () => {
-  const mirroring = mirrorFromArgv(["--mirror", "--mirror-port=9333", "--mirror-target=page-7"]);
+  const mirroring = mirrorFromArgv([
+    "--mirror",
+    `--mirror-cdp=${SOCKET}`,
+    "--mirror-target=page-7",
+  ]);
 
   const opened = tabOptionsIn(mirroring, {});
   assert.deepEqual(opened.mirror, {
@@ -48,7 +62,7 @@ test("every tab a mirroring session opens stays in the browser it mirrors", () =
     targetId: null,
     newTab: true,
   });
-  assert.equal(opened.mirror.endpoint.port, 9333, "the same browser, on the same port");
+  assert.equal(opened.mirror.endpoint.socketUrl, SOCKET, "the same browser, on the same socket");
 
   const first = tabOptionsIn(mirroring, { mirror: mirroring });
   assert.equal(first.mirror.targetId, "page-7", "the tab we were asked for keeps its target");

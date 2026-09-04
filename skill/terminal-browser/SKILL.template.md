@@ -12,6 +12,15 @@ page and opening it is a way to show something you built.
 `terminal-browser ls` shows the browsers and tabs in this terminal tab, with the
 tab ids the other commands take.
 
+`terminal-browser --mirror` shows a tab from the browser the human already has
+open, so the page keeps their logins and profile. It finds the browser itself
+once the human has turned remote debugging on at `chrome://inspect/#remote-debugging`
+and pressed Allow; nothing needs restarting or relaunching with flags. Tabs you
+open from a mirroring pane are opened in their browser too, and closing the pane
+lets go of the tab rather than closing it. `terminal-browser action` connects to
+their browser separately, so the first automated command on a mirrored tab may
+need one more Allow from them.
+
 `terminal-browser action -- <command>` is an agent-browser compatible CLI for a
 tab that is already open. It targets this terminal tab's browser and its active
 tab unless you select another one.
